@@ -19,18 +19,23 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
     setError('');
     setLoading(true);
 
-    // Simulate network delay for better UX
-    await new Promise(resolve => setTimeout(resolve, 500));
+    try {
+      // Validate passkey against backend API
+      const isValid = await validatePasskey(passkey);
 
-    if (validatePasskey(passkey)) {
-      createAuthSession();
-      onLogin();
-    } else {
-      setError('Invalid passkey. Please try again.');
-      setPasskey('');
+      if (isValid) {
+        // Create local session
+        createAuthSession();
+        onLogin();
+      } else {
+        setError('Invalid passkey. Please try again.');
+        setPasskey('');
+      }
+    } catch (err) {
+      setError('Connection error. Please ensure backend is running.');
+    } finally {
+      setLoading(false);
     }
-    
-    setLoading(false);
   };
 
   return (
@@ -38,7 +43,10 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
       {/* Animated background effects */}
       <div className="absolute inset-0 overflow-hidden">
         <div className="absolute -top-1/2 -left-1/2 w-full h-full bg-blue-500/10 rounded-full blur-3xl animate-pulse-slow" />
-        <div className="absolute -bottom-1/2 -right-1/2 w-full h-full bg-cyan-500/10 rounded-full blur-3xl animate-pulse-slow" style={{ animationDelay: '1s' }} />
+        <div
+          className="absolute -bottom-1/2 -right-1/2 w-full h-full bg-cyan-500/10 rounded-full blur-3xl animate-pulse-slow"
+          style={{ animationDelay: '1s' }}
+        />
       </div>
 
       {/* Login Card */}
@@ -55,7 +63,10 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
         </div>
 
         {/* Login Form */}
-        <div className="bg-slate-900/50 backdrop-blur-xl rounded-2xl shadow-2xl border border-slate-800/50 p-8 animate-slide-in-up" style={{ animationDelay: '0.1s' }}>
+        <div
+          className="bg-slate-900/50 backdrop-blur-xl rounded-2xl shadow-2xl border border-slate-800/50 p-8 animate-slide-in-up"
+          style={{ animationDelay: '0.1s' }}
+        >
           <div className="flex items-center justify-center mb-6">
             <Shield className="w-6 h-6 text-cyan-400 mr-2" />
             <h2 className="text-xl font-semibold text-slate-200">Secure Login</h2>
@@ -105,9 +116,25 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
             >
               {loading ? (
                 <span className="flex items-center justify-center">
-                  <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  <svg
+                    className="animate-spin -ml-1 mr-3 h-5 w-5 text-white"
+                    xmlns="http://www.w3.org/2000/svg"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                  >
+                    <circle
+                      className="opacity-25"
+                      cx="12"
+                      cy="12"
+                      r="10"
+                      stroke="currentColor"
+                      strokeWidth="4"
+                    ></circle>
+                    <path
+                      className="opacity-75"
+                      fill="currentColor"
+                      d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                    ></path>
                   </svg>
                   Authenticating...
                 </span>
@@ -122,19 +149,23 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
             <div className="flex items-start space-x-3 text-xs text-slate-500">
               <Shield className="w-4 h-4 mt-0.5 flex-shrink-0" />
               <p>
-                Your session is encrypted and will remain active for 24 hours.
-                Default passkey is <code className="text-cyan-400 bg-slate-800 px-1 py-0.5 rounded">admin123</code>
+                Passkey is validated against backend database. Default passkey is{' '}
+                <code className="text-cyan-400 bg-slate-800 px-1 py-0.5 rounded">
+                  admin123
+                </code>
               </p>
             </div>
           </div>
         </div>
 
         {/* Footer */}
-        <div className="text-center mt-8 text-slate-500 text-sm animate-slide-in-up" style={{ animationDelay: '0.2s' }}>
+        <div
+          className="text-center mt-8 text-slate-500 text-sm animate-slide-in-up"
+          style={{ animationDelay: '0.2s' }}
+        >
           <p>Powered by TastyTrade API | Secured Access</p>
         </div>
       </div>
     </div>
   );
 }
-

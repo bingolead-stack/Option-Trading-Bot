@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { isAuthenticated } from '@/lib/auth';
+import { isAuthenticated, logout } from '@/lib/auth';
 import LoginScreen from '@/components/LoginScreen';
 import AdminPanel from '@/components/AdminPanel';
 import Header from '@/components/Header';
@@ -26,6 +26,7 @@ export default function Home() {
   };
 
   const handleLogout = () => {
+    logout();
     setAuthenticated(false);
   };
 

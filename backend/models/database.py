@@ -59,6 +59,16 @@ class BotStatus(Base):
     config = Column(JSON)  # Store additional configuration
 
 
+class AdminSettings(Base):
+    """Admin settings including passkey"""
+    __tablename__ = 'admin_settings'
+    
+    id = Column(Integer, primary_key=True)
+    passkey = Column(String(255), nullable=False, default='admin123')
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class PriceCache(Base):
     """Cache for option prices and open prices (5-minute intervals)"""
     __tablename__ = 'price_cache'
@@ -111,9 +121,10 @@ class DatabaseManager:
             self._init_bot_status()
     
     def _init_bot_status(self):
-        """Initialize bot status record"""
+        """Initialize bot status record and admin settings"""
         session = self.Session()
         try:
+            # Initialize bot status
             status = session.query(BotStatus).first()
             if not status:
                 status = BotStatus(
@@ -124,7 +135,16 @@ class DatabaseManager:
                     config={}
                 )
                 session.add(status)
-                session.commit()
+            
+            # Initialize admin settings with default passkey
+            admin = session.query(AdminSettings).first()
+            if not admin:
+                admin = AdminSettings(
+                    passkey='admin123'  # Default passkey
+                )
+                session.add(admin)
+            
+            session.commit()
         finally:
             session.close()
     

@@ -1,8 +1,8 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { Shield, Key, X, Check, AlertTriangle } from 'lucide-react';
-import { getStoredPasskey, setPasskey, isDefaultPasskey } from '@/lib/auth';
+import { changePasskey } from '@/lib/auth';
 
 interface AdminPanelProps {
   isOpen: boolean;
@@ -15,26 +15,14 @@ export default function AdminPanel({ isOpen, onClose }: AdminPanelProps) {
   const [confirmPasskey, setConfirmPasskey] = useState('');
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
-  const [showWarning, setShowWarning] = useState(false);
-
-  useEffect(() => {
-    if (isOpen) {
-      setShowWarning(isDefaultPasskey());
-    }
-  }, [isOpen]);
+  const [loading, setLoading] = useState(false);
 
   if (!isOpen) return null;
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
     setSuccess('');
-
-    // Validate current passkey
-    if (currentPasskey !== getStoredPasskey()) {
-      setError('Current passkey is incorrect');
-      return;
-    }
 
     // Validate new passkey
     if (newPasskey.length < 6) {
@@ -47,18 +35,30 @@ export default function AdminPanel({ isOpen, onClose }: AdminPanelProps) {
       return;
     }
 
-    // Update passkey
-    setPasskey(newPasskey);
-    setSuccess('Passkey updated successfully!');
-    setCurrentPasskey('');
-    setNewPasskey('');
-    setConfirmPasskey('');
-    setShowWarning(false);
+    setLoading(true);
 
-    // Close after 2 seconds
-    setTimeout(() => {
-      onClose();
-    }, 2000);
+    try {
+      // Call backend API to change passkey
+      const result = await changePasskey(currentPasskey, newPasskey);
+      
+      if (result.success) {
+        setSuccess('Passkey updated successfully!');
+        setCurrentPasskey('');
+        setNewPasskey('');
+        setConfirmPasskey('');
+
+        // Close after 2 seconds
+        setTimeout(() => {
+          onClose();
+        }, 2000);
+      } else {
+        setError(result.error || 'Failed to update passkey');
+      }
+    } catch (err) {
+      setError('Connection error. Please ensure backend is running.');
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -85,18 +85,16 @@ export default function AdminPanel({ isOpen, onClose }: AdminPanelProps) {
           </div>
         </div>
 
-        {/* Warning for default passkey */}
-        {showWarning && (
-          <div className="m-6 p-4 bg-yellow-500/10 border border-yellow-500/30 rounded-xl flex items-start space-x-3 animate-pulse">
-            <AlertTriangle className="w-5 h-5 text-yellow-400 flex-shrink-0 mt-0.5" />
-            <div className="flex-1">
-              <h4 className="text-sm font-semibold text-yellow-400 mb-1">Security Alert</h4>
-              <p className="text-xs text-yellow-300/80">
-                You're using the default passkey. Please change it immediately for security.
-              </p>
-            </div>
+        {/* Security warning */}
+        <div className="m-6 p-4 bg-yellow-500/10 border border-yellow-500/30 rounded-xl flex items-start space-x-3">
+          <AlertTriangle className="w-5 h-5 text-yellow-400 flex-shrink-0 mt-0.5" />
+          <div className="flex-1">
+            <h4 className="text-sm font-semibold text-yellow-400 mb-1">Security Reminder</h4>
+            <p className="text-xs text-yellow-300/80">
+              Change the default passkey (admin123) immediately for security. The passkey is stored in the database and synced across sessions.
+            </p>
           </div>
-        )}
+        </div>
 
         {/* Form */}
         <form onSubmit={handleSubmit} className="p-6 space-y-5">
@@ -184,9 +182,10 @@ export default function AdminPanel({ isOpen, onClose }: AdminPanelProps) {
             </button>
             <button
               type="submit"
-              className="flex-1 px-4 py-3 bg-gradient-to-r from-cyan-500 via-blue-500 to-indigo-600 hover:from-cyan-600 hover:via-blue-600 hover:to-indigo-700 text-white rounded-xl font-semibold shadow-lg shadow-cyan-500/30 transition-all"
+              disabled={loading}
+              className="flex-1 px-4 py-3 bg-gradient-to-r from-cyan-500 via-blue-500 to-indigo-600 hover:from-cyan-600 hover:via-blue-600 hover:to-indigo-700 text-white rounded-xl font-semibold shadow-lg shadow-cyan-500/30 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              Update Passkey
+              {loading ? 'Updating...' : 'Update Passkey'}
             </button>
           </div>
         </form>

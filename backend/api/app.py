@@ -8,7 +8,7 @@ from datetime import datetime, time as dt_time
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from models.database import get_session, Ticker, Trade, BotStatus, PriceCache
+from models.database import get_session, Ticker, Trade, BotStatus, PriceCache, AdminSettings
 from config.settings import PORT, CORS_ORIGINS
 
 # Configure logging
@@ -38,9 +38,6 @@ app.add_middleware(
 
 # Global bot instance (will be set from main)
 bot_instance = None
-
-# In-memory passkey storage (for demo - use database in production)
-stored_passkey = 'admin123'
 
 
 def set_bot_instance(bot):
@@ -192,37 +189,81 @@ async def health_check():
 
 @app.post("/api/auth/validate", tags=["Authentication"], status_code=status.HTTP_200_OK)
 async def validate_auth(payload: PasskeyValidation):
-    """Validate passkey"""
-    if payload.passkey == stored_passkey:
-        return {"valid": True}
-    else:
+    """Validate passkey against database"""
+    session = get_session()
+    try:
+        admin = session.query(AdminSettings).first()
+        if not admin:
+            # Initialize with default passkey if not exists
+            admin = AdminSettings(passkey='admin123')
+            session.add(admin)
+            session.commit()
+        
+        if payload.passkey == admin.passkey:
+            return {"valid": True}
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid passkey"
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error validating passkey: {e}")
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid passkey"
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error validating passkey"
         )
+    finally:
+        session.close()
 
 
 @app.post("/api/auth/change-passkey", tags=["Authentication"], response_model=MessageResponse)
 async def change_passkey(payload: PasskeyChange):
-    """Change passkey (admin only)"""
-    global stored_passkey
-    
-    if payload.current_passkey != stored_passkey:
+    """Change passkey (admin only) - stored in database"""
+    session = get_session()
+    try:
+        admin = session.query(AdminSettings).first()
+        if not admin:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Admin settings not found"
+            )
+        
+        # Verify current passkey
+        if payload.current_passkey != admin.passkey:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid current passkey"
+            )
+        
+        # Validate new passkey
+        if len(payload.new_passkey) < 6:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="New passkey must be at least 6 characters"
+            )
+        
+        # Update passkey in database
+        admin.passkey = payload.new_passkey
+        admin.updated_at = datetime.utcnow()
+        session.commit()
+        
+        logger.info("Passkey changed successfully (stored in database)")
+        
+        return {"message": "Passkey changed successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error changing passkey: {e}")
+        session.rollback()
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid current passkey"
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
         )
-    
-    if len(payload.new_passkey) < 6:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="New passkey must be at least 6 characters"
-        )
-    
-    stored_passkey = payload.new_passkey
-    logger.info("Passkey changed successfully")
-    
-    return {"message": "Passkey changed successfully"}
+    finally:
+        session.close()
 
 
 # ==================== BOT CONTROL ====================
