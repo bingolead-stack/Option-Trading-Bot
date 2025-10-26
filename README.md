@@ -211,8 +211,8 @@ CAPITAL_PER_TRADE=500
 DEFAULT_THRESHOLD=0.5
 
 # Server Configuration
-FLASK_PORT=5000
-FLASK_DEBUG=true
+PORT=5000
+DEBUG=true
 CORS_ORIGINS=http://localhost:3000
 
 # Database Configuration

@@ -9,7 +9,7 @@ from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from models.database import get_session, Ticker, Trade, BotStatus, PriceCache
-from config.settings import FLASK_PORT, CORS_ORIGINS
+from config.settings import PORT, CORS_ORIGINS
 
 # Configure logging
 logging.basicConfig(
@@ -722,4 +722,4 @@ async def internal_error_handler(request, exc):
 # For development
 if __name__ == '__main__':
     import uvicorn
-    uvicorn.run(app, host='0.0.0.0', port=FLASK_PORT)
+    uvicorn.run(app, host='0.0.0.0', port=PORT)

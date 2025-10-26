@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config.settings import (
     TASTY_USERNAME, TASTY_PASSWORD, TASTY_ACCOUNT_NUMBER,
-    PAPER_TRADING, SIGNAL_CHECK_INTERVAL, LOG_PATH, LOG_LEVEL, FLASK_PORT
+    PAPER_TRADING, SIGNAL_CHECK_INTERVAL, LOG_PATH, LOG_LEVEL, PORT
 )
 from models.database import DatabaseManager
 from bot.tasty_client import TastyClient
@@ -145,8 +145,8 @@ class TradingBot:
         
         # Run FastAPI with Uvicorn
         logger.info("Starting FastAPI server...")
-        logger.info(f"API running at: http://localhost:{FLASK_PORT}")
-        logger.info(f"API Docs: http://localhost:{FLASK_PORT}/api/docs")
+        logger.info(f"API running at: http://localhost:{PORT}")
+        logger.info(f"API Docs: http://localhost:{PORT}/api/docs")
         logger.info(f"Dashboard available at: http://localhost:3000")
         
         try:
@@ -154,7 +154,7 @@ class TradingBot:
             uvicorn.run(
                 app,
                 host='0.0.0.0',
-                port=FLASK_PORT,
+                port=PORT,
                 log_level='info',
                 access_log=False
             )

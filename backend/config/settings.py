@@ -23,8 +23,8 @@ CAPITAL_PER_TRADE = float(os.getenv('CAPITAL_PER_TRADE', 500))
 DEFAULT_THRESHOLD = float(os.getenv('DEFAULT_THRESHOLD', 0.5))
 
 # Server Configuration
-FLASK_PORT = int(os.getenv('FLASK_PORT', 5000))
-FLASK_DEBUG = os.getenv('FLASK_DEBUG', 'true').lower() == 'true'
+PORT = int(os.getenv('PORT', 5000))
+DEBUG = os.getenv('DEBUG', 'true').lower() == 'true'
 CORS_ORIGINS = os.getenv('CORS_ORIGINS', 'http://localhost:3000').split(',')
 
 # Database Configuration
