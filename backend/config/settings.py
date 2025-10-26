@@ -41,8 +41,9 @@ TRADING_END_HOUR = 16
 TRADING_END_MINUTE = 0
 
 # Data Update Intervals (seconds)
-PRICE_UPDATE_INTERVAL = 60  # 1 minute for 5-min candles
-POSITION_UPDATE_INTERVAL = 30  # Check positions every 30 seconds
+PRICE_UPDATE_INTERVAL = 300  # 5 minutes (300 seconds) for 5-min candles
+POSITION_UPDATE_INTERVAL = 60  # Check positions every 60 seconds
+SIGNAL_CHECK_INTERVAL = 60  # Check for signals every 60 seconds
 
 # Risk Management
 MAX_DAILY_LOSS = 2000  # Maximum loss per day in dollars

@@ -1,5 +1,6 @@
 """
 TastyTrade API Client Wrapper
+Handles connection to TastyTrade API and option trading operations
 """
 import logging
 from datetime import datetime, timedelta
@@ -7,7 +8,8 @@ from typing import List, Dict, Optional
 from tastytrade import Session, Account, ProductionSession, CertificationSession
 from tastytrade.dxfeed import EventType
 from tastytrade.instruments import get_option_chain, NestedOptionChain
-from tastytrade.order import NewOrder, OrderAction, OrderTimeInForce, OrderType, PriceEffect
+from tastytrade.order import NewOrder, OrderAction, OrderTimeInForce, OrderType, PriceEffect, OrderStatus
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -132,19 +134,28 @@ class TastyClient:
             # Use DXFeed to get quote
             from tastytrade.dxfeed import DXFeedStreamer
             
-            streamer = DXFeedStreamer(self.session)
+            async_streamer = DXFeedStreamer(self.session)
             
-            # Subscribe and get quote
-            quote = streamer.get_event(EventType.QUOTE, [option_symbol])
-            
-            if quote:
-                return {
-                    'symbol': option_symbol,
-                    'bid': quote[0].bidPrice if hasattr(quote[0], 'bidPrice') else 0,
-                    'ask': quote[0].askPrice if hasattr(quote[0], 'askPrice') else 0,
-                    'last': quote[0].lastPrice if hasattr(quote[0], 'lastPrice') else 0,
-                    'mark': (quote[0].bidPrice + quote[0].askPrice) / 2 if hasattr(quote[0], 'bidPrice') else 0
-                }
+            try:
+                # Subscribe and get quote
+                quote = async_streamer.get_event(EventType.QUOTE, [option_symbol])
+                
+                if quote and len(quote) > 0:
+                    q = quote[0]
+                    bid = getattr(q, 'bidPrice', 0) or 0
+                    ask = getattr(q, 'askPrice', 0) or 0
+                    last = getattr(q, 'lastPrice', 0) or 0
+                    mark = (bid + ask) / 2 if (bid > 0 and ask > 0) else last
+                    
+                    return {
+                        'symbol': option_symbol,
+                        'bid': bid,
+                        'ask': ask,
+                        'last': last,
+                        'mark': mark if mark > 0 else 0.01  # Fallback to minimum
+                    }
+            finally:
+                async_streamer.close()
             
             return None
             
@@ -158,12 +169,22 @@ class TastyClient:
             from tastytrade.dxfeed import DXFeedStreamer
             
             streamer = DXFeedStreamer(self.session)
-            quote = streamer.get_event(EventType.QUOTE, [symbol])
             
-            if quote:
-                # Return mark price (mid of bid-ask)
-                if hasattr(quote[0], 'bidPrice') and hasattr(quote[0], 'askPrice'):
-                    return (quote[0].bidPrice + quote[0].askPrice) / 2
+            try:
+                quote = streamer.get_event(EventType.QUOTE, [symbol])
+                
+                if quote and len(quote) > 0:
+                    q = quote[0]
+                    bid = getattr(q, 'bidPrice', 0) or 0
+                    ask = getattr(q, 'askPrice', 0) or 0
+                    last = getattr(q, 'lastPrice', 0) or 0
+                    
+                    # Return mark price (mid of bid-ask), fallback to last
+                    if bid > 0 and ask > 0:
+                        return (bid + ask) / 2
+                    return last if last > 0 else None
+            finally:
+                streamer.close()
             
             return None
             
@@ -171,39 +192,59 @@ class TastyClient:
             logger.error(f"Error getting price for {symbol}: {e}")
             return None
     
-    def place_order(self, option_symbol: str, quantity: int, order_type: str = 'MARKET') -> Optional[str]:
+    def place_order(self, option_symbol: str, quantity: int, action: str = 'BUY', 
+                   order_type: str = 'MARKET', limit_price: Optional[float] = None) -> Optional[str]:
         """
         Place an order for an option
         
         Args:
             option_symbol: Option symbol
             quantity: Number of contracts
+            action: 'BUY' or 'SELL'
             order_type: 'MARKET' or 'LIMIT'
+            limit_price: Limit price (required for LIMIT orders)
             
         Returns:
             Order ID if successful, None otherwise
         """
         try:
-            # Create order
-            order = NewOrder(
-                time_in_force=OrderTimeInForce.DAY,
-                order_type=OrderType.MARKET if order_type == 'MARKET' else OrderType.LIMIT,
-                legs=[
-                    {
-                        'instrument_type': 'Equity Option',
-                        'symbol': option_symbol,
-                        'quantity': quantity,
-                        'action': OrderAction.BUY_TO_OPEN
-                    }
-                ]
+            from tastytrade.order import Leg
+            
+            # Determine order action
+            if action.upper() == 'BUY':
+                order_action = OrderAction.BUY_TO_OPEN
+            else:
+                order_action = OrderAction.SELL_TO_CLOSE
+            
+            # Create leg
+            leg = Leg(
+                instrument_type='Equity Option',
+                symbol=option_symbol,
+                quantity=quantity,
+                action=order_action
             )
+            
+            # Create order
+            if order_type.upper() == 'LIMIT' and limit_price:
+                order = NewOrder(
+                    time_in_force=OrderTimeInForce.DAY,
+                    order_type=OrderType.LIMIT,
+                    legs=[leg],
+                    price=limit_price
+                )
+            else:
+                order = NewOrder(
+                    time_in_force=OrderTimeInForce.DAY,
+                    order_type=OrderType.MARKET,
+                    legs=[leg]
+                )
             
             # Place order
             response = self.account.place_order(self.session, order, dry_run=False)
             
             if response:
                 order_id = response.id if hasattr(response, 'id') else str(response)
-                logger.info(f"Order placed: {order_id} for {option_symbol} x{quantity}")
+                logger.info(f"Order placed: {order_id} for {option_symbol} x{quantity} {action}")
                 return order_id
             
             return None

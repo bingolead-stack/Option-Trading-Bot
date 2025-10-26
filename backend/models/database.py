@@ -60,7 +60,7 @@ class BotStatus(Base):
 
 
 class PriceCache(Base):
-    """Cache for option prices and open prices"""
+    """Cache for option prices and open prices (5-minute intervals)"""
     __tablename__ = 'price_cache'
     
     id = Column(Integer, primary_key=True)
@@ -69,11 +69,14 @@ class PriceCache(Base):
     option_type = Column(String(4), nullable=False)
     strike = Column(Float, nullable=False)
     expiration = Column(String(10), nullable=False)
-    open_price = Column(Float)
+    open_price = Column(Float)  # Open price at market open (9:30 ET)
     current_price = Column(Float)
+    high_price = Column(Float)
+    low_price = Column(Float)
     underlying_price = Column(Float)
     timestamp = Column(DateTime, default=datetime.utcnow)
     date = Column(String(10))  # YYYY-MM-DD for daily open prices
+    interval_time = Column(String(5))  # HH:MM for 5-minute interval tracking
 
 
 class DatabaseManager:

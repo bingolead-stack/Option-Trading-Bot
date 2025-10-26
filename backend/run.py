@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config.settings import (
     TASTY_USERNAME, TASTY_PASSWORD, TASTY_ACCOUNT_NUMBER,
-    PAPER_TRADING, PRICE_UPDATE_INTERVAL, LOG_PATH, LOG_LEVEL, FLASK_PORT
+    PAPER_TRADING, SIGNAL_CHECK_INTERVAL, LOG_PATH, LOG_LEVEL, FLASK_PORT
 )
 from models.database import DatabaseManager
 from bot.tasty_client import TastyClient
@@ -72,12 +72,12 @@ class TradingBot:
             self.engine = TradingEngine(self.client)
             logger.info("Trading engine initialized")
             
-            # Setup scheduler
+            # Setup scheduler (runs every 60 seconds to check for signals)
             self.scheduler = BackgroundScheduler()
             self.scheduler.add_job(
                 self.engine.run_cycle,
                 'interval',
-                seconds=PRICE_UPDATE_INTERVAL,
+                seconds=SIGNAL_CHECK_INTERVAL,
                 id='trading_cycle'
             )
             
