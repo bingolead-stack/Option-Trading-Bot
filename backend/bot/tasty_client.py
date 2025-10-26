@@ -5,7 +5,7 @@ Handles connection to TastyTrade API and option trading operations
 import logging
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional
-from tastytrade import Session, Account, ProductionSession, CertificationSession
+from tastytrade import Session, Account
 from tastytrade.dxfeed import EventType
 from tastytrade.instruments import get_option_chain, NestedOptionChain
 from tastytrade.order import NewOrder, OrderAction, OrderTimeInForce, OrderType, PriceEffect, OrderStatus
@@ -28,27 +28,48 @@ class TastyClient:
     def connect(self) -> bool:
         """Connect to TastyTrade API"""
         try:
-            # Use certification (paper) or production session
+            # Create session with appropriate environment
+            # In tastytrade 8.2+, Session handles both production and certification
+            # Use is_test parameter to specify environment
+            self.session = Session(
+                self.username, 
+                self.password,
+                is_test=self.paper_trading  # True for paper trading, False for live
+            )
+            
             if self.paper_trading:
-                self.session = CertificationSession(self.username, self.password)
                 logger.info("Connected to TastyTrade Certification (Paper) environment")
             else:
-                self.session = ProductionSession(self.username, self.password)
                 logger.info("Connected to TastyTrade Production environment")
             
             # Get account
             accounts = Account.get_accounts(self.session)
-            self.account = next((a for a in accounts if a.account_number == self.account_number), None)
             
-            if not self.account:
-                logger.error(f"Account {self.account_number} not found")
+            if not accounts:
+                logger.error("No accounts found")
                 return False
+            
+            # If account number specified, find it; otherwise use first account
+            if self.account_number:
+                self.account = next(
+                    (a for a in accounts if a.account_number == self.account_number), 
+                    None
+                )
+                if not self.account:
+                    logger.error(f"Account {self.account_number} not found")
+                    logger.info(f"Available accounts: {[a.account_number for a in accounts]}")
+                    return False
+            else:
+                # Use first account if no account number specified
+                self.account = accounts[0]
+                logger.info(f"No account number specified, using first account: {self.account.account_number}")
             
             logger.info(f"Account loaded: {self.account.account_number}")
             return True
             
         except Exception as e:
             logger.error(f"Failed to connect to TastyTrade: {e}")
+            logger.error(f"Error details: {type(e).__name__}: {str(e)}")
             return False
     
     def get_option_chain(self, symbol: str) -> Optional[NestedOptionChain]:
