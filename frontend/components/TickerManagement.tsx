@@ -185,7 +185,7 @@ export default function TickerManagement() {
               <TrendingUp className="w-8 h-8 text-slate-600" />
             </div>
             <p className="text-lg mb-2 text-slate-400">No tickers added yet</p>
-            <p className="text-sm text-slate-600">Click "Add Ticker" to get started</p>
+            <p className="text-sm text-slate-600">Click &quotAdd Ticker&quot to get started</p>
           </div>
         ) : (
           tickers.map((ticker) => (

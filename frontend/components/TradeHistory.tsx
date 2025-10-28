@@ -7,13 +7,7 @@ import { apiService, Trade } from '@/lib/api';
 export default function TradeHistory() {
   const [trades, setTrades] = useState<Trade[]>([]);
   const [filter, setFilter] = useState<'all' | 'open' | 'closed'>('all');
-
-  useEffect(() => {
-    fetchTrades();
-    const interval = setInterval(fetchTrades, 15000);
-    return () => clearInterval(interval);
-  }, [filter]);
-
+  
   const fetchTrades = async () => {
     try {
       const data = await apiService.getTrades(filter);
@@ -22,6 +16,12 @@ export default function TradeHistory() {
       console.error('Failed to fetch trades:', error);
     }
   };
+
+  useEffect(() => {
+    fetchTrades();
+    const interval = setInterval(fetchTrades, 15000);
+    return () => clearInterval(interval);
+  }, [filter, fetchTrades]);
 
   const formatCurrency = (value: number) => {
     return `$${value.toFixed(2)}`;
