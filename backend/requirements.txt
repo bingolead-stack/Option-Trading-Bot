@@ -15,8 +15,7 @@ APScheduler==3.10.4
 # Environment Variables
 python-dotenv==1.0.0
 
-# TastyTrade API
-tastytrade==11.0.0
+# HTTP Client for TastyTrade API (direct API calls)
 requests==2.31.0
 
 # Data Processing
