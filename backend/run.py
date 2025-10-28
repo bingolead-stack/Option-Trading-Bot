@@ -25,30 +25,11 @@ from api.app import app, set_bot_instance
 os.makedirs(LOG_PATH, exist_ok=True)
 
 # Determine log level
-log_level = getattr(logging, LOG_LEVEL.upper(), logging.INFO)
-
 logging.basicConfig(
-    level=log_level,  # Use configured log level
+    level=logging.INFO,  # Use configured log level
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(os.path.join(LOG_PATH, 'bot.log')),
-        logging.StreamHandler()
-    ],
-    force=True  # Override any existing configuration
 )
 logger = logging.getLogger(__name__)
-
-# Set log levels for specific modules (our bot modules should be DEBUG for troubleshooting)
-logging.getLogger('bot.tasty_client').setLevel(logging.DEBUG)
-logging.getLogger('bot.trading_engine').setLevel(logging.DEBUG)
-
-# Reduce noise from external libraries - only show WARNING and above
-logging.getLogger('tastytrade').setLevel(logging.INFO)
-logging.getLogger('httpx').setLevel(logging.INFO)
-logging.getLogger('httpcore').setLevel(logging.WARNING)  # Suppress httpcore DEBUG
-logging.getLogger('websockets').setLevel(logging.WARNING)  # Suppress websocket DEBUG
-logging.getLogger('asyncio').setLevel(logging.WARNING)  # Suppress asyncio DEBUG
-logging.getLogger('apscheduler').setLevel(logging.INFO)  # Less verbose scheduler
 
 
 class TradingBot:

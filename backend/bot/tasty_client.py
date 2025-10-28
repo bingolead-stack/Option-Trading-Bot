@@ -1,21 +1,23 @@
 """
-TastyTrade API Client - Direct API Implementation with OAuth
-Handles connection to TastyTrade API using direct HTTP calls with OAuth token management
+TastyTrade API Client - Direct API with WebSocket Streaming
+Handles OAuth authentication and DXLink WebSocket streaming for live market data
 """
 import logging
 import httpx
 import asyncio
+import websockets
+import json
 from datetime import datetime, timedelta
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Set
 from decimal import Decimal
 import time
-import json
+import threading
 
 logger = logging.getLogger(__name__)
 
 
 class TastyClient:
-    """Direct API client for TastyTrade with OAuth token management"""
+    """Direct API client for TastyTrade with WebSocket streaming for market data"""
     
     # API Base URLs
     CERT_BASE_URL = "https://api.cert.tastyworks.com"  # Paper trading
@@ -23,10 +25,10 @@ class TastyClient:
     
     def __init__(self, client_secret: str, refresh_token: str, account_number: str, paper_trading: bool = True):
         """
-        Initialize TastyTrade API client with OAuth
+        Initialize TastyTrade API client with WebSocket streaming
         
         Args:
-            client_secret: OAuth client secret (provider_secret)
+            client_secret: OAuth client secret
             refresh_token: OAuth refresh token
             account_number: Account number
             paper_trading: Use paper trading environment if True
@@ -43,15 +45,28 @@ class TastyClient:
         self.session_token = None
         self.token_expires_at = None
         
-        # HTTP client with reasonable timeouts
+        # HTTP client
         self.client = httpx.Client(timeout=30.0)
+        
+        # WebSocket streaming
+        self.ws = None
+        self.dxlink_url = None
+        self.dxlink_token = None
+        self.ws_channel = 1  # Channel for market data
+        self.quote_cache = {}  # Cache latest quotes
+        self.subscribed_symbols = set()  # Track subscribed symbols
+        self.ws_task = None
+        self.ws_loop = None
+        self.keepalive_task = None
         
         # Account info
         self.account = None
         
     def __del__(self):
-        """Clean up HTTP clients"""
+        """Clean up resources"""
         try:
+            if self.ws:
+                asyncio.run(self._close_websocket())
             self.client.close()
         except:
             pass
@@ -71,11 +86,11 @@ class TastyClient:
         if not self.token_expires_at:
             return True
         # Refresh if token expires in less than 10 minutes
-        return datetime.now() >= self.token_expires_at - timedelta(minutes=12)
+        return datetime.now() >= self.token_expires_at - timedelta(minutes=10)
     
     def _get_access_token(self) -> bool:
         """
-        Get access token using OAuth client credentials and refresh token
+        Get access token using OAuth
         
         Returns:
             True if token obtained successfully
@@ -83,7 +98,6 @@ class TastyClient:
         try:
             url = f"{self.base_url}/oauth/token"
             
-            # OAuth authentication payload
             payload = {
                 "grant_type": "refresh_token",
                 "refresh_token": self.refresh_token,
@@ -92,7 +106,7 @@ class TastyClient:
             
             headers = {
                 "Content-Type": "application/json",
-                "Accept": "application/json",
+                "Accept": "application/json"
             }
             
             logger.info(f"Getting OAuth token from TastyTrade {'Certification (Paper)' if self.paper_trading else 'Production'} environment...")
@@ -107,9 +121,8 @@ class TastyClient:
             
             if 'access_token' in data:
                 self.session_token = data.get('access_token')
-                expires_in = data.get('expires_in')
+                expires_in = data.get('expires_in', 86400)  # Default 24 hours
                 
-                # Token typically expires after 24 hours
                 self.token_expires_at = datetime.now() + timedelta(seconds=expires_in)
                 
                 logger.info("Successfully obtained OAuth access token")
@@ -122,7 +135,6 @@ class TastyClient:
             logger.error(f"OAuth token error: {e}", exc_info=True)
             return False
     
-    
     def _ensure_authenticated(self) -> bool:
         """
         Ensure we have a valid session token, refresh if needed
@@ -130,17 +142,283 @@ class TastyClient:
         Returns:
             True if authenticated
         """
-        # Check if token exists and is not expired
         if self.session_token and not self._is_token_expired():
             return True
         
-        # Need to get new token
         logger.info("Session token missing or expired, obtaining new token...")
         return self._get_access_token()
     
+    def _get_dxlink_token(self) -> bool:
+        """
+        Get DXLink WebSocket token for streaming
+        
+        Returns:
+            True if token obtained
+        """
+        try:
+            if not self._ensure_authenticated():
+                return False
+            
+            url = f"{self.base_url}/api-quote-tokens"
+            response = self.client.get(url, headers=self._get_headers())
+            
+            if response.status_code != 200:
+                logger.error(f"Failed to get DXLink token: {response.status_code} - {response.text}")
+                return False
+            
+            data = response.json()
+            token_data = data.get('data', {})
+            
+            self.dxlink_token = token_data.get('token')
+            self.dxlink_url = token_data.get('dxlink-url')
+            
+            if not self.dxlink_token or not self.dxlink_url:
+                logger.error(f"Invalid DXLink token response: {data}")
+                return False
+            
+            logger.info(f"Got DXLink token and URL: {self.dxlink_url}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error getting DXLink token: {e}", exc_info=True)
+            return False
+    
+    async def _websocket_handler(self):
+        """Main WebSocket handler loop"""
+        try:
+            logger.info(f"Connecting to DXLink WebSocket: {self.dxlink_url}")
+            
+            async with websockets.connect(self.dxlink_url) as websocket:
+                self.ws = websocket
+                
+                # Step 1: SETUP
+                setup_msg = {
+                    "type": "SETUP",
+                    "channel": 0,
+                    "version": "0.1-DXF-JS/0.3.0",
+                    "keepaliveTimeout": 60,
+                    "acceptKeepaliveTimeout": 60
+                }
+                await websocket.send(json.dumps(setup_msg))
+                logger.debug(f"Sent SETUP: {setup_msg}")
+                
+                response = await websocket.recv()
+                logger.debug(f"Received: {response}")
+                
+                # Step 2: Wait for AUTH_STATE and AUTHORIZE
+                response = await websocket.recv()
+                logger.debug(f"Received: {response}")
+                
+                auth_msg = {
+                    "type": "AUTH",
+                    "channel": 0,
+                    "token": self.dxlink_token
+                }
+                await websocket.send(json.dumps(auth_msg))
+                logger.debug(f"Sent AUTH")
+                
+                response = await websocket.recv()
+                logger.debug(f"Received: {response}")
+                
+                # Step 3: CHANNEL_REQUEST
+                channel_msg = {
+                    "type": "CHANNEL_REQUEST",
+                    "channel": self.ws_channel,
+                    "service": "FEED",
+                    "parameters": {"contract": "AUTO"}
+                }
+                await websocket.send(json.dumps(channel_msg))
+                logger.debug(f"Sent CHANNEL_REQUEST")
+                
+                response = await websocket.recv()
+                logger.debug(f"Received: {response}")
+                
+                # Step 4: FEED_SETUP
+                feed_setup_msg = {
+                    "type": "FEED_SETUP",
+                    "channel": self.ws_channel,
+                    "acceptAggregationPeriod": 0.1,
+                    "acceptDataFormat": "COMPACT",
+                    "acceptEventFields": {
+                        "Quote": ["eventType", "eventSymbol", "bidPrice", "askPrice", "bidSize", "askSize"],
+                        "Trade": ["eventType", "eventSymbol", "price", "size", "dayVolume"]
+                    }
+                }
+                await websocket.send(json.dumps(feed_setup_msg))
+                logger.debug(f"Sent FEED_SETUP")
+                
+                response = await websocket.recv()
+                logger.debug(f"Received: {response}")
+                
+                logger.info("✓ WebSocket connection established and configured")
+                
+                # Start keepalive task
+                self.keepalive_task = asyncio.create_task(self._keepalive_loop(websocket))
+                
+                # Listen for messages
+                async for message in websocket:
+                    try:
+                        data = json.loads(message)
+                        await self._handle_message(data)
+                    except Exception as e:
+                        logger.error(f"Error handling message: {e}")
+                        
+        except websockets.exceptions.ConnectionClosed:
+            logger.warning("WebSocket connection closed")
+        except Exception as e:
+            logger.error(f"WebSocket error: {e}", exc_info=True)
+        finally:
+            self.ws = None
+            if self.keepalive_task:
+                self.keepalive_task.cancel()
+    
+    async def _keepalive_loop(self, websocket):
+        """Send keepalive messages every 30 seconds"""
+        try:
+            while True:
+                await asyncio.sleep(30)
+                keepalive_msg = {"type": "KEEPALIVE", "channel": 0}
+                await websocket.send(json.dumps(keepalive_msg))
+                logger.debug("Sent KEEPALIVE")
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error(f"Keepalive error: {e}")
+    
+    async def _handle_message(self, data: dict):
+        """Handle incoming WebSocket messages"""
+        msg_type = data.get('type')
+        
+        if msg_type == 'FEED_DATA':
+            # Parse market data
+            channel = data.get('channel')
+            feed_data = data.get('data', [])
+            
+            if not feed_data:
+                return
+            
+            # COMPACT format: ["Quote", [data...]]
+            event_type = feed_data[0] if len(feed_data) > 0 else None
+            events = feed_data[1] if len(feed_data) > 1 else []
+            
+            if event_type == "Quote":
+                # Parse Quote events
+                # Format: ["Quote", symbol, bidPrice, askPrice, bidSize, askSize, ...]
+                i = 0
+                while i < len(events):
+                    if events[i] == "Quote":
+                        try:
+                            symbol = events[i + 1]
+                            bid_price = float(events[i + 2]) if events[i + 2] not in ['NaN', None] else 0
+                            ask_price = float(events[i + 3]) if events[i + 3] not in ['NaN', None] else 0
+                            
+                            # Update cache
+                            if symbol not in self.quote_cache:
+                                self.quote_cache[symbol] = {}
+                            
+                            self.quote_cache[symbol].update({
+                                'bid': bid_price,
+                                'ask': ask_price,
+                                'mark': (bid_price + ask_price) / 2 if (bid_price > 0 and ask_price > 0) else 0,
+                                'timestamp': time.time()
+                            })
+                            
+                            i += 6  # Move to next quote (Quote type + 5 fields)
+                        except (IndexError, ValueError) as e:
+                            logger.debug(f"Error parsing quote: {e}")
+                            break
+                    else:
+                        i += 1
+            
+            elif event_type == "Trade":
+                # Parse Trade events for last price
+                i = 0
+                while i < len(events):
+                    if events[i] == "Trade":
+                        try:
+                            symbol = events[i + 1]
+                            last_price = float(events[i + 2]) if events[i + 2] not in ['NaN', None] else 0
+                            
+                            if symbol not in self.quote_cache:
+                                self.quote_cache[symbol] = {}
+                            
+                            self.quote_cache[symbol].update({
+                                'last': last_price,
+                                'timestamp': time.time()
+                            })
+                            
+                            i += 5  # Move to next trade
+                        except (IndexError, ValueError) as e:
+                            logger.debug(f"Error parsing trade: {e}")
+                            break
+                    else:
+                        i += 1
+    
+    async def _subscribe_symbols(self, symbols: List[str]):
+        """Subscribe to symbols on WebSocket"""
+        if not self.ws:
+            logger.error("WebSocket not connected")
+            return False
+        
+        try:
+            # Build subscription list
+            add_list = []
+            for symbol in symbols:
+                if symbol not in self.subscribed_symbols:
+                    add_list.append({"type": "Quote", "symbol": symbol})
+                    add_list.append({"type": "Trade", "symbol": symbol})
+                    self.subscribed_symbols.add(symbol)
+            
+            if not add_list:
+                return True  # Already subscribed
+            
+            sub_msg = {
+                "type": "FEED_SUBSCRIPTION",
+                "channel": self.ws_channel,
+                "add": add_list
+            }
+            
+            await self.ws.send(json.dumps(sub_msg))
+            logger.info(f"Subscribed to {len(symbols)} symbols")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error subscribing to symbols: {e}")
+            return False
+    
+    async def _close_websocket(self):
+        """Close WebSocket connection"""
+        if self.ws:
+            try:
+                await self.ws.close()
+            except:
+                pass
+            self.ws = None
+        
+        if self.keepalive_task:
+            self.keepalive_task.cancel()
+    
+    def _start_websocket_thread(self):
+        """Start WebSocket in a separate thread with its own event loop"""
+        def run_websocket():
+            self.ws_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self.ws_loop)
+            try:
+                self.ws_loop.run_until_complete(self._websocket_handler())
+            except Exception as e:
+                logger.error(f"WebSocket thread error: {e}")
+            finally:
+                self.ws_loop.close()
+        
+        thread = threading.Thread(target=run_websocket, daemon=True)
+        thread.start()
+        
+        # Wait a bit for connection to establish
+        time.sleep(3)
+    
     def connect(self) -> bool:
         """
-        Connect to TastyTrade API and load account
+        Connect to TastyTrade API and start WebSocket streaming
         
         Returns:
             True if connection successful
@@ -187,6 +465,16 @@ class TastyClient:
                 logger.info(f"No account specified, using first account: {self.account_number}")
             
             logger.info(f"Account loaded: {self.account_number}")
+            
+            # Get DXLink token and start WebSocket
+            if not self._get_dxlink_token():
+                logger.error("Failed to get DXLink token")
+                return False
+            
+            # Start WebSocket connection
+            self._start_websocket_thread()
+            
+            logger.info("✓ TastyTrade API and WebSocket streaming ready")
             return True
             
         except Exception as e:
@@ -195,7 +483,7 @@ class TastyClient:
     
     def get_option_chain(self, symbol: str) -> Optional[Dict]:
         """
-        Get option chain for a symbol
+        Get option chain for a symbol via REST API
         
         Args:
             symbol: Underlying symbol (e.g., 'SPY')
@@ -225,7 +513,6 @@ class TastyClient:
             # Parse into dict[date, list[option]]
             chain = {}
             
-            # The response structure has items, each with expirations
             for item in items:
                 expirations = item.get('expirations', [])
                 
@@ -335,98 +622,50 @@ class TastyClient:
             logger.error(f"Error finding ATM option: {e}", exc_info=True)
             return None
     
-    def _categorize_symbols(self, symbols: List[str]) -> Dict[str, List[str]]:
+    def _occ_to_streamer(self, occ_symbol: str) -> str:
         """
-        Categorize symbols by type (equity or equity-option)
+        Convert OCC option symbol to streamer format
         
         Args:
-            symbols: List of symbols
+            occ_symbol: OCC format like "SPY   251031C00370000"
             
         Returns:
-            Dict with 'equity' and 'equity-option' lists
-        """
-        categorized = {'equity': [], 'equity-option': []}
-        
-        for symbol in symbols:
-            # Option symbols contain spaces (e.g., "SPY   251031C00370000")
-            # or are in streamer format starting with . (e.g., ".SPY251031C370")
-            if ' ' in symbol or (symbol.startswith('.') and len(symbol) > 10):
-                # Remove leading dot if present (streamer format)
-                clean_symbol = symbol[1:] if symbol.startswith('.') else symbol
-                categorized['equity-option'].append(clean_symbol)
-            else:
-                categorized['equity'].append(symbol)
-        
-        return categorized
-    
-    def get_market_data(self, symbols: List[str]) -> Dict[str, Dict]:
-        """
-        Get market data (quotes) for symbols using REST API
-        Uses /market-data/by-type endpoint
-        
-        Args:
-            symbols: List of symbols (can be stocks or option symbols)
-            
-        Returns:
-            Dict mapping symbol to quote data
+            Streamer format like ".SPY251031C370"
         """
         try:
-            if not self._ensure_authenticated():
-                logger.error("Not authenticated")
-                return {}
+            # Remove extra spaces and parse
+            parts = occ_symbol.split()
+            if len(parts) != 2:
+                return occ_symbol
             
-            if not symbols:
-                return {}
+            ticker = parts[0]
+            rest = parts[1]
             
-            # Categorize symbols by type
-            categorized = self._categorize_symbols(symbols)
+            # Format: YYMMDDCPPPPPPP0
+            # Extract: date (6), C/P (1), strike (8)
+            if len(rest) < 15:
+                return occ_symbol
             
-            # Build query parameters
-            params = {}
-            if categorized['equity']:
-                params['equity'] = ','.join(categorized['equity'])
-            if categorized['equity-option']:
-                params['equity-option'] = ','.join(categorized['equity-option'])
+            date_part = rest[:6]  # YYMMDD -> YYMMDD
+            option_type = rest[6]  # C or P
+            strike_raw = rest[7:15]  # 00370000
             
-            # TastyTrade market data endpoint
-            url = f"{self.base_url}/market-data/by-type"
+            # Convert strike: 00370000 -> 370
+            strike = str(int(strike_raw) / 1000)
+            if '.' in strike:
+                strike = strike.rstrip('0').rstrip('.')
             
-            response = self.client.get(url, params=params, headers=self._get_headers())
-            
-            if response.status_code != 200:
-                logger.warning(f"Market data request failed: {response.status_code} - {response.text}")
-                return {}
-            
-            data = response.json()
-            items = data.get('data', {}).get('items', [])
-            
-            result = {}
-            for item in items:
-                symbol = item.get('symbol')
-                if symbol:
-                    # Parse numeric fields safely
-                    bid = float(item.get('bid', 0) or 0)
-                    ask = float(item.get('ask', 0) or 0)
-                    last = float(item.get('last', 0) or 0)
-                    mark = float(item.get('mark', 0) or 0)
-                    
-                    result[symbol] = {
-                        'bid': bid,
-                        'ask': ask,
-                        'last': last,
-                        'mark': mark
-                    }
-            
-            return result
+            # Build streamer symbol: .SPY251031C370
+            streamer = f".{ticker}{date_part}{option_type}{strike}"
+            return streamer
             
         except Exception as e:
-            logger.error(f"Error getting market data: {e}", exc_info=True)
-            return {}
-    
+            logger.debug(f"Error converting OCC to streamer: {e}")
+            return occ_symbol
     
     def get_option_quote(self, option_symbol: str) -> Optional[Dict]:
         """
-        Get current quote for an option
+        Get current quote for an option from WebSocket stream
         
         Args:
             option_symbol: Option symbol (OCC format with spaces or streamer format)
@@ -436,34 +675,62 @@ class TastyClient:
             Dictionary with bid, ask, last, mark prices
         """
         try:
-            # Get quote using the market data endpoint
-            quotes = self.get_market_data([option_symbol])
+            # Use streamer symbol for WebSocket
+            if option_symbol.startswith('.'):
+                streamer_symbol = option_symbol
+            else:
+                # Convert OCC to streamer format
+                streamer_symbol = self._occ_to_streamer(option_symbol)
             
-            # The API returns the symbol without the leading dot
-            clean_symbol = option_symbol[1:] if option_symbol.startswith('.') else option_symbol
+            # Subscribe to symbol if not already subscribed
+            if streamer_symbol not in self.subscribed_symbols:
+                if self.ws_loop:
+                    asyncio.run_coroutine_threadsafe(
+                        self._subscribe_symbols([streamer_symbol]),
+                        self.ws_loop
+                    )
+                    # Wait a bit for subscription
+                    time.sleep(0.5)
             
-            if clean_symbol in quotes:
-                quote = quotes[clean_symbol]
+            # Get from cache
+            if streamer_symbol in self.quote_cache:
+                quote = self.quote_cache[streamer_symbol]
                 bid = quote.get('bid', 0) or 0
                 ask = quote.get('ask', 0) or 0
                 last = quote.get('last', 0) or 0
                 mark = quote.get('mark', 0) or 0
                 
-                # Calculate mark if not provided
+                # Calculate mark if needed
                 if mark == 0 and bid > 0 and ask > 0:
                     mark = (bid + ask) / 2
                 elif mark == 0:
                     mark = last
                 
                 return {
-                    'symbol': clean_symbol,
+                    'symbol': option_symbol,
                     'bid': bid,
                     'ask': ask,
                     'last': last,
                     'mark': mark if mark > 0 else 0.01
                 }
             else:
-                logger.warning(f"No quote data for {option_symbol}")
+                logger.warning(f"No cached quote for {option_symbol}, waiting for data...")
+                # Wait a bit and try again
+                time.sleep(1)
+                if streamer_symbol in self.quote_cache:
+                    quote = self.quote_cache[streamer_symbol]
+                    bid = quote.get('bid', 0) or 0
+                    ask = quote.get('ask', 0) or 0
+                    last = quote.get('last', 0) or 0
+                    mark = (bid + ask) / 2 if (bid > 0 and ask > 0) else last
+                    
+                    return {
+                        'symbol': option_symbol,
+                        'bid': bid,
+                        'ask': ask,
+                        'last': last,
+                        'mark': mark if mark > 0 else 0.01
+                    }
                 return None
                 
         except Exception as e:
@@ -472,7 +739,7 @@ class TastyClient:
     
     def get_underlying_price(self, symbol: str) -> Optional[float]:
         """
-        Get current price of underlying symbol
+        Get current price of underlying symbol from WebSocket stream
         
         Args:
             symbol: Underlying ticker symbol
@@ -481,10 +748,19 @@ class TastyClient:
             Current price or None
         """
         try:
-            quotes = self.get_market_data([symbol])
+            # Subscribe to symbol if not already subscribed
+            if symbol not in self.subscribed_symbols:
+                if self.ws_loop:
+                    asyncio.run_coroutine_threadsafe(
+                        self._subscribe_symbols([symbol]),
+                        self.ws_loop
+                    )
+                    # Wait a bit for subscription
+                    time.sleep(0.5)
             
-            if symbol in quotes:
-                quote = quotes[symbol]
+            # Get from cache
+            if symbol in self.quote_cache:
+                quote = self.quote_cache[symbol]
                 bid = quote.get('bid', 0) or 0
                 ask = quote.get('ask', 0) or 0
                 last = quote.get('last', 0) or 0
@@ -497,10 +773,21 @@ class TastyClient:
                     logger.debug(f"{symbol}: last={last}")
                     return last
                 else:
-                    logger.warning(f"{symbol}: no valid price data")
+                    logger.warning(f"{symbol}: no valid price data in cache")
                     return None
             else:
-                logger.warning(f"No quote for {symbol}")
+                logger.warning(f"No cached quote for {symbol}, waiting for data...")
+                # Wait a bit and try again
+                time.sleep(1)
+                if symbol in self.quote_cache:
+                    quote = self.quote_cache[symbol]
+                    bid = quote.get('bid', 0) or 0
+                    ask = quote.get('ask', 0) or 0
+                    last = quote.get('last', 0) or 0
+                    
+                    if bid > 0 and ask > 0:
+                        return (bid + ask) / 2
+                    return last if last > 0 else None
                 return None
                 
         except Exception as e:
@@ -510,7 +797,7 @@ class TastyClient:
     def place_order(self, option_symbol: str, quantity: int, action: str = 'BUY',
                    order_type: str = 'MARKET', limit_price: Optional[float] = None) -> Optional[str]:
         """
-        Place an order for an option
+        Place an order for an option via REST API
         
         Args:
             option_symbol: Option symbol (OCC format)
@@ -573,7 +860,7 @@ class TastyClient:
                 return str(order_id)
             else:
                 logger.warning(f"Order response missing ID: {data}")
-                return "DRY_RUN_" + str(int(time.time()))  # Fallback ID for dry-run
+                return "DRY_RUN_" + str(int(time.time()))
             
         except Exception as e:
             logger.error(f"Error placing order: {e}", exc_info=True)
@@ -581,7 +868,7 @@ class TastyClient:
     
     def get_positions(self) -> List[Dict]:
         """
-        Get current positions
+        Get current positions via REST API
         
         Returns:
             List of position dictionaries
@@ -620,7 +907,7 @@ class TastyClient:
     
     def get_account_balance(self) -> Dict:
         """
-        Get account balance information
+        Get account balance information via REST API
         
         Returns:
             Dictionary with balance info
