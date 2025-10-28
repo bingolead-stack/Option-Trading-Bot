@@ -153,9 +153,9 @@ class TastyClient:
         """
         try:
             # Use DXFeed to get quote
-            from tastytrade.dxfeed import DXFeedStreamer
+            from tastytrade import DXLinkStreamer
             
-            async_streamer = DXFeedStreamer(self.session)
+            async_streamer = DXLinkStreamer(self.session)
             
             try:
                 # Subscribe and get quote
@@ -187,9 +187,9 @@ class TastyClient:
     def get_underlying_price(self, symbol: str) -> Optional[float]:
         """Get current price of underlying symbol"""
         try:
-            from tastytrade.dxfeed import DXFeedStreamer
+            from tastytrade import DXLinkStreamer
             
-            streamer = DXFeedStreamer(self.session)
+            streamer = DXLinkStreamer(self.session)
             
             try:
                 quote = streamer.get_event(EventType.QUOTE, [symbol])
