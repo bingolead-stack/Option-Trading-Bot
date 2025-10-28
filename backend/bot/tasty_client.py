@@ -7,6 +7,7 @@ import httpx
 import asyncio
 import websockets
 import json
+import ssl
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Set
 from decimal import Decimal
@@ -188,7 +189,12 @@ class TastyClient:
         try:
             logger.info(f"Connecting to DXLink WebSocket: {self.dxlink_url}")
             
-            async with websockets.connect(self.dxlink_url) as websocket:
+            # Configure SSL context to handle certificate verification
+            ssl_context = ssl.create_default_context()
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
+            
+            async with websockets.connect(self.dxlink_url, ssl=ssl_context) as websocket:
                 self.ws = websocket
                 
                 # Step 1: SETUP
