@@ -12,7 +12,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config.settings import (
-    TASTY_USERNAME, TASTY_PASSWORD, TASTY_ACCOUNT_NUMBER,
+    TASTY_CLIENT_SECRET, TASTY_REFRESH_TOKEN, TASTY_ACCOUNT_NUMBER,
     PAPER_TRADING, SIGNAL_CHECK_INTERVAL, LOG_PATH, LOG_LEVEL, PORT
 )
 from models.database import DatabaseManager
@@ -52,13 +52,13 @@ class TradingBot:
             logger.info("Database initialized")
             
             # Initialize TastyTrade client
-            if not TASTY_USERNAME or not TASTY_PASSWORD:
-                logger.warning("TastyTrade credentials not configured. Running in demo mode.")
+            if not TASTY_CLIENT_SECRET or not TASTY_REFRESH_TOKEN:
+                logger.warning("TastyTrade OAuth credentials not configured. Running in demo mode.")
                 return False
             
             self.client = TastyClient(
-                TASTY_USERNAME,
-                TASTY_PASSWORD,
+                TASTY_CLIENT_SECRET,
+                TASTY_REFRESH_TOKEN,
                 TASTY_ACCOUNT_NUMBER,
                 PAPER_TRADING
             )

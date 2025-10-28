@@ -3,10 +3,13 @@ TastyTrade API Client Wrapper
 Handles connection to TastyTrade API and option trading operations
 """
 import logging
+import asyncio
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional
+from decimal import Decimal
 from tastytrade import Session, Account
-from tastytrade.dxfeed import EventType
+from tastytrade import DXLinkStreamer
+from tastytrade.dxfeed import Quote
 from tastytrade.instruments import get_option_chain, NestedOptionChain
 from tastytrade.order import NewOrder, OrderAction, OrderTimeInForce, OrderType, PriceEffect, OrderStatus
 import time
@@ -17,9 +20,9 @@ logger = logging.getLogger(__name__)
 class TastyClient:
     """Wrapper for TastyTrade API"""
     
-    def __init__(self, username: str, password: str, account_number: str, paper_trading: bool = True):
-        self.username = username
-        self.password = password
+    def __init__(self, client_secret: str, refresh_token: str, account_number: str, paper_trading: bool = True):
+        self.client_secret = client_secret
+        self.refresh_token = refresh_token
         self.account_number = account_number
         self.paper_trading = paper_trading
         self.session = None
@@ -28,13 +31,13 @@ class TastyClient:
     def connect(self) -> bool:
         """Connect to TastyTrade API"""
         try:
-            # Create session with appropriate environment
-            # In tastytrade 8.2+, Session handles both production and certification
+            # Create session with OAuth credentials
+            # In tastytrade 11.0.0, Session uses OAuth with provider_secret and refresh_token
             # Use is_test parameter to specify environment
             self.session = Session(
-                self.username, 
-                self.password,
-                is_test=self.paper_trading  # True for paper trading, False for live
+                self.client_secret, 
+                self.refresh_token,
+                is_test=self.paper_trading
             )
             
             if self.paper_trading:
@@ -42,8 +45,8 @@ class TastyClient:
             else:
                 logger.info("Connected to TastyTrade Production environment")
             
-            # Get account
-            accounts = Account.get_accounts(self.session)
+            # Get account (Account.get returns a list in v11.0.0)
+            accounts = Account.get(self.session)
             
             if not accounts:
                 logger.error("No accounts found")
@@ -144,6 +147,25 @@ class TastyClient:
             logger.error(f"Error finding ATM option for {symbol}: {e}")
             return None
     
+    async def _get_quote_async(self, symbol: str) -> Optional[Quote]:
+        """
+        Async helper to get quote from DXLinkStreamer
+        
+        Args:
+            symbol: Symbol to get quote for
+            
+        Returns:
+            Quote object or None
+        """
+        try:
+            async with DXLinkStreamer(self.session) as streamer:
+                await streamer.subscribe(Quote, [symbol])
+                quote = await streamer.get_event(Quote)
+                return quote
+        except Exception as e:
+            logger.error(f"Error getting quote for {symbol}: {e}")
+            return None
+    
     def get_option_quote(self, option_symbol: str) -> Optional[Dict]:
         """
         Get current quote for an option
@@ -152,31 +174,30 @@ class TastyClient:
             Dictionary with bid, ask, last, mark prices
         """
         try:
-            # Use DXFeed to get quote
-            from tastytrade import DXLinkStreamer
+            # Run async method in event loop
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # If loop is already running, create a new one in a thread
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(asyncio.run, self._get_quote_async(option_symbol))
+                    quote = future.result(timeout=10)
+            else:
+                quote = loop.run_until_complete(self._get_quote_async(option_symbol))
             
-            async_streamer = DXLinkStreamer(self.session)
-            
-            try:
-                # Subscribe and get quote
-                quote = async_streamer.get_event(EventType.QUOTE, [option_symbol])
+            if quote:
+                bid = getattr(quote, 'bid_price', 0) or 0
+                ask = getattr(quote, 'ask_price', 0) or 0
+                last = getattr(quote, 'last_price', 0) or 0
+                mark = (bid + ask) / 2 if (bid > 0 and ask > 0) else last
                 
-                if quote and len(quote) > 0:
-                    q = quote[0]
-                    bid = getattr(q, 'bidPrice', 0) or 0
-                    ask = getattr(q, 'askPrice', 0) or 0
-                    last = getattr(q, 'lastPrice', 0) or 0
-                    mark = (bid + ask) / 2 if (bid > 0 and ask > 0) else last
-                    
-                    return {
-                        'symbol': option_symbol,
-                        'bid': bid,
-                        'ask': ask,
-                        'last': last,
-                        'mark': mark if mark > 0 else 0.01  # Fallback to minimum
-                    }
-            finally:
-                async_streamer.close()
+                return {
+                    'symbol': option_symbol,
+                    'bid': bid,
+                    'ask': ask,
+                    'last': last,
+                    'mark': mark if mark > 0 else 0.01  # Fallback to minimum
+                }
             
             return None
             
@@ -187,25 +208,26 @@ class TastyClient:
     def get_underlying_price(self, symbol: str) -> Optional[float]:
         """Get current price of underlying symbol"""
         try:
-            from tastytrade import DXLinkStreamer
+            # Run async method in event loop
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # If loop is already running, create a new one in a thread
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(asyncio.run, self._get_quote_async(symbol))
+                    quote = future.result(timeout=10)
+            else:
+                quote = loop.run_until_complete(self._get_quote_async(symbol))
             
-            streamer = DXLinkStreamer(self.session)
-            
-            try:
-                quote = streamer.get_event(EventType.QUOTE, [symbol])
+            if quote:
+                bid = getattr(quote, 'bid_price', 0) or 0
+                ask = getattr(quote, 'ask_price', 0) or 0
+                last = getattr(quote, 'last_price', 0) or 0
                 
-                if quote and len(quote) > 0:
-                    q = quote[0]
-                    bid = getattr(q, 'bidPrice', 0) or 0
-                    ask = getattr(q, 'askPrice', 0) or 0
-                    last = getattr(q, 'lastPrice', 0) or 0
-                    
-                    # Return mark price (mid of bid-ask), fallback to last
-                    if bid > 0 and ask > 0:
-                        return (bid + ask) / 2
-                    return last if last > 0 else None
-            finally:
-                streamer.close()
+                # Return mark price (mid of bid-ask), fallback to last
+                if bid > 0 and ask > 0:
+                    return (bid + ask) / 2
+                return last if last > 0 else None
             
             return None
             
@@ -241,7 +263,7 @@ class TastyClient:
             leg = Leg(
                 instrument_type='Equity Option',
                 symbol=option_symbol,
-                quantity=quantity,
+                quantity=Decimal(str(quantity)),
                 action=order_action
             )
             
@@ -251,7 +273,7 @@ class TastyClient:
                     time_in_force=OrderTimeInForce.DAY,
                     order_type=OrderType.LIMIT,
                     legs=[leg],
-                    price=limit_price
+                    price=Decimal(str(limit_price))
                 )
             else:
                 order = NewOrder(

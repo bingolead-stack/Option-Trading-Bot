@@ -11,9 +11,9 @@ load_dotenv()
 # Base directory
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
-# TastyTrade API Configuration
-TASTY_USERNAME = os.getenv('TASTY_USERNAME', '')
-TASTY_PASSWORD = os.getenv('TASTY_PASSWORD', '')
+# TastyTrade API Configuration (OAuth)
+TASTY_CLIENT_SECRET = os.getenv('TASTY_CLIENT_SECRET', '')
+TASTY_REFRESH_TOKEN = os.getenv('TASTY_REFRESH_TOKEN', '')
 TASTY_ACCOUNT_NUMBER = os.getenv('TASTY_ACCOUNT_NUMBER', '')
 
 # Trading Configuration
