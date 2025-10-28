@@ -31,7 +31,7 @@ CORS_ORIGINS = os.getenv('CORS_ORIGINS', 'http://localhost:3000').split(',')
 DATABASE_PATH = os.path.join(BASE_DIR, os.getenv('DATABASE_PATH', 'data/trading_bot.db'))
 
 # Logging Configuration
-LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
+LOG_LEVEL = os.getenv('LOG_LEVEL', 'DEBUG')
 LOG_PATH = os.path.join(BASE_DIR, os.getenv('LOG_PATH', 'data/logs'))
 
 # Trading Hours (Eastern Time)

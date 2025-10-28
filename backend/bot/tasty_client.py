@@ -10,7 +10,7 @@ from decimal import Decimal
 from tastytrade import Session, Account
 from tastytrade import DXLinkStreamer
 from tastytrade.dxfeed import Quote
-from tastytrade.instruments import get_option_chain, NestedOptionChain
+from tastytrade.instruments import get_option_chain, Option
 from tastytrade.order import NewOrder, OrderAction, OrderTimeInForce, OrderType, PriceEffect, OrderStatus
 import time
 
@@ -39,6 +39,11 @@ class TastyClient:
                 self.refresh_token,
                 is_test=self.paper_trading
             )
+            
+            # Set reasonable timeouts on the httpx clients to prevent hanging
+            # Default is 5 seconds, but option chains can be large
+            self.session.sync_client.timeout = 30.0  # 30 second timeout
+            self.session.async_client.timeout = 30.0
             
             if self.paper_trading:
                 logger.info("Connected to TastyTrade Certification (Paper) environment")
@@ -75,13 +80,23 @@ class TastyClient:
             logger.error(f"Error details: {type(e).__name__}: {str(e)}")
             return False
     
-    def get_option_chain(self, symbol: str) -> Optional[NestedOptionChain]:
-        """Get option chain for a symbol"""
+    def get_option_chain(self, symbol: str) -> Optional[Dict]:
+        """Get option chain for a symbol (returns dict[date, list[Option]])"""
         try:
+            logger.debug(f"Fetching option chain for {symbol}")
             chain = get_option_chain(self.session, symbol)
+            
+            if chain:
+                logger.debug(f"Retrieved option chain with {len(chain)} expirations")
+                # Log first few expirations for debugging
+                for i, (exp_date, opts) in enumerate(sorted(chain.items())[:3]):
+                    logger.debug(f"  Expiration {i+1}: {exp_date} with {len(opts)} options")
+            else:
+                logger.warning(f"Empty option chain returned for {symbol}")
+            
             return chain
         except Exception as e:
-            logger.error(f"Error getting option chain for {symbol}: {e}")
+            logger.error(f"Error getting option chain for {symbol}: {e}", exc_info=True)
             return None
     
     def find_atm_option(self, symbol: str, option_type: str, underlying_price: float, 
@@ -100,51 +115,65 @@ class TastyClient:
             Dictionary with option details or None
         """
         try:
+            logger.debug(f"Finding ATM {option_type} for {symbol}, underlying_price={underlying_price}, DTE range={days_to_exp_min}-{days_to_exp_max}")
+            
             chain = self.get_option_chain(symbol)
             if not chain:
+                logger.warning(f"No option chain returned for {symbol}")
                 return None
             
-            # Filter expirations by DTE
-            today = datetime.now().date()
-            valid_expirations = []
+            logger.debug(f"Option chain has {len(chain)} expiration dates")
             
-            for exp_date_str in chain.expirations:
-                exp_date = datetime.strptime(exp_date_str, '%Y-%m-%d').date()
+            # Filter expirations by DTE
+            # chain is now dict[date, list[Option]]
+            today = datetime.now().date()
+            valid_options = []
+            
+            # Map option_type string to OptionType enum value ('C' or 'P')
+            target_type = 'C' if option_type.upper() == 'CALL' else 'P'
+            
+            for exp_date, options_list in sorted(chain.items()):
                 dte = (exp_date - today).days
                 
                 if days_to_exp_min <= dte <= days_to_exp_max:
-                    valid_expirations.append(exp_date_str)
+                    # Filter by option type ('C' or 'P')
+                    for option in options_list:
+                        if option.option_type.value == target_type:
+                            valid_options.append(option)
+                            # Only log first few to avoid spam
+                            if len(valid_options) <= 5 or len(valid_options) == len(options_list) // 2:
+                                logger.debug(f"      Added {option_type} strike={option.strike_price}")
             
-            if not valid_expirations:
-                logger.warning(f"No valid expirations found for {symbol}")
+            if not valid_options:
+                logger.warning(f"No valid options found for {symbol} {option_type} (checked {len(chain)} expirations)")
                 return None
             
-            # Use the nearest expiration
-            nearest_exp = valid_expirations[0]
+            logger.debug(f"Found {len(valid_options)} valid {option_type} options")
             
-            # Get strikes for this expiration
-            strikes = chain.strikes[nearest_exp]
+            # Find ATM option (closest strike to underlying price)
+            atm_option = min(valid_options, key=lambda opt: abs(float(opt.strike_price) - float(underlying_price)))
             
-            # Find ATM strike (closest to underlying price)
-            atm_strike = min(strikes, key=lambda x: abs(x - underlying_price))
+            # Calculate DTE
+            dte = (atm_option.expiration_date - today).days
             
-            # Build option symbol
-            exp_formatted = datetime.strptime(nearest_exp, '%Y-%m-%d').strftime('%y%m%d')
-            option_type_code = 'C' if option_type.lower() == 'call' else 'P'
-            strike_formatted = f"{int(atm_strike * 1000):08d}"
-            option_symbol = f"{symbol.ljust(6)}{exp_formatted}{option_type_code}{strike_formatted}"
+            logger.debug(
+                f"Selected ATM {option_type}: strike={atm_option.strike_price}, "
+                f"expiration={atm_option.expiration_date}, DTE={dte}, "
+                f"symbol={atm_option.symbol}, streamer_symbol={atm_option.streamer_symbol}"
+            )
             
             return {
-                'symbol': option_symbol.replace(' ', ''),
+                'symbol': atm_option.symbol,  # Use OCC symbol format for orders, not streamer_symbol
+                'streamer_symbol': atm_option.streamer_symbol,  # Keep for streaming quotes
                 'underlying': symbol,
                 'option_type': option_type.upper(),
-                'strike': atm_strike,
-                'expiration': nearest_exp,
-                'dte': (datetime.strptime(nearest_exp, '%Y-%m-%d').date() - today).days
+                'strike': float(atm_option.strike_price),
+                'expiration': atm_option.expiration_date.strftime('%Y-%m-%d'),
+                'dte': dte
             }
             
         except Exception as e:
-            logger.error(f"Error finding ATM option for {symbol}: {e}")
+            logger.error(f"Error finding ATM option for {symbol}: {e}", exc_info=True)
             return None
     
     async def _get_quote_async(self, symbol: str) -> Optional[Quote]:
@@ -160,8 +189,12 @@ class TastyClient:
         try:
             async with DXLinkStreamer(self.session) as streamer:
                 await streamer.subscribe(Quote, [symbol])
-                quote = await streamer.get_event(Quote)
+                # Add timeout to prevent hanging (10 seconds)
+                quote = await asyncio.wait_for(streamer.get_event(Quote), timeout=10.0)
                 return quote
+        except asyncio.TimeoutError:
+            logger.warning(f"Timeout getting quote for {symbol} after 10 seconds")
+            return None
         except Exception as e:
             logger.error(f"Error getting quote for {symbol}: {e}")
             return None
@@ -170,20 +203,27 @@ class TastyClient:
         """
         Get current quote for an option
         
+        Args:
+            option_symbol: Can be either OCC format or streamer symbol format
+        
         Returns:
             Dictionary with bid, ask, last, mark prices
         """
         try:
-            # Run async method in event loop
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # If loop is already running, create a new one in a thread
-                import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor() as executor:
-                    future = executor.submit(asyncio.run, self._get_quote_async(option_symbol))
-                    quote = future.result(timeout=10)
+            # Convert OCC symbol to streamer symbol if needed
+            # Streamer symbols start with '.' (e.g., .SPY251031C687)
+            # OCC symbols do not (e.g., SPY   251031C00687000)
+            if not option_symbol.startswith('.'):
+                # It's an OCC symbol, convert to streamer format
+                from tastytrade.instruments import Option
+                streamer_symbol = Option.occ_to_streamer_symbol(option_symbol)
+                logger.debug(f"Converted OCC symbol {option_symbol} to streamer symbol {streamer_symbol}")
             else:
-                quote = loop.run_until_complete(self._get_quote_async(option_symbol))
+                streamer_symbol = option_symbol
+            
+            logger.debug(f"Fetching option quote for {streamer_symbol}")
+            # Run async method - asyncio.run() creates a new event loop
+            quote = asyncio.run(self._get_quote_async(streamer_symbol))
             
             if quote:
                 bid = getattr(quote, 'bid_price', 0) or 0
@@ -191,33 +231,29 @@ class TastyClient:
                 last = getattr(quote, 'last_price', 0) or 0
                 mark = (bid + ask) / 2 if (bid > 0 and ask > 0) else last
                 
+                logger.debug(f"Option quote: bid={bid}, ask={ask}, mark={mark}")
+                
                 return {
-                    'symbol': option_symbol,
+                    'symbol': streamer_symbol,
                     'bid': bid,
                     'ask': ask,
                     'last': last,
                     'mark': mark if mark > 0 else 0.01  # Fallback to minimum
                 }
-            
-            return None
+            else:
+                logger.warning(f"No quote returned for option {streamer_symbol}")
+                return None
             
         except Exception as e:
-            logger.error(f"Error getting quote for {option_symbol}: {e}")
+            logger.error(f"Error getting quote for {option_symbol}: {e}", exc_info=True)
             return None
     
     def get_underlying_price(self, symbol: str) -> Optional[float]:
         """Get current price of underlying symbol"""
         try:
-            # Run async method in event loop
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # If loop is already running, create a new one in a thread
-                import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor() as executor:
-                    future = executor.submit(asyncio.run, self._get_quote_async(symbol))
-                    quote = future.result(timeout=10)
-            else:
-                quote = loop.run_until_complete(self._get_quote_async(symbol))
+            logger.debug(f"Fetching quote for {symbol}")
+            # Run async method - asyncio.run() creates a new event loop
+            quote = asyncio.run(self._get_quote_async(symbol))
             
             if quote:
                 bid = getattr(quote, 'bid_price', 0) or 0
@@ -226,13 +262,21 @@ class TastyClient:
                 
                 # Return mark price (mid of bid-ask), fallback to last
                 if bid > 0 and ask > 0:
-                    return (bid + ask) / 2
-                return last if last > 0 else None
-            
-            return None
+                    price = (bid + ask) / 2
+                    logger.debug(f"{symbol} quote: bid={bid}, ask={ask}, mark={price}")
+                    return price
+                elif last > 0:
+                    logger.debug(f"{symbol} quote: last={last} (no bid/ask)")
+                    return last
+                else:
+                    logger.warning(f"{symbol} quote has no valid prices: bid={bid}, ask={ask}, last={last}")
+                    return None
+            else:
+                logger.warning(f"No quote returned for {symbol}")
+                return None
             
         except Exception as e:
-            logger.error(f"Error getting price for {symbol}: {e}")
+            logger.error(f"Error getting price for {symbol}: {e}", exc_info=True)
             return None
     
     def place_order(self, option_symbol: str, quantity: int, action: str = 'BUY', 
@@ -282,18 +326,29 @@ class TastyClient:
                     legs=[leg]
                 )
             
-            # Place order
-            response = self.account.place_order(self.session, order, dry_run=False)
+            env_type = "PAPER" if self.paper_trading else "LIVE"
+            logger.info(f"Placing {env_type} order: {action} {quantity}x {option_symbol}")
+            
+            response = self.account.place_order(self.session, order, dry_run=True)
             
             if response:
-                order_id = response.id if hasattr(response, 'id') else str(response)
-                logger.info(f"Order placed: {order_id} for {option_symbol} x{quantity} {action}")
-                return order_id
+                # Extract order ID from response
+                if hasattr(response, 'order') and hasattr(response.order, 'id'):
+                    order_id = response.order.id
+                elif hasattr(response, 'id'):
+                    order_id = response.id
+                else:
+                    order_id = str(response)
+                
+                logger.info(f"✓ {env_type} order placed successfully: ID={order_id}, {option_symbol} x{quantity} {action}")
+                return str(order_id)
             
             return None
             
         except Exception as e:
             logger.error(f"Error placing order for {option_symbol}: {e}")
+            import traceback
+            logger.error(f"Full traceback: {traceback.format_exc()}")
             return None
     
     def get_positions(self) -> List[Dict]:

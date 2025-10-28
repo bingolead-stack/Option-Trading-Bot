@@ -137,7 +137,7 @@ class TradingEngine:
         finally:
             session.close()
     
-    def check_entry_signal(self, ticker_config: Ticker, option_type: str) -> Optional[Dict]:
+    def check_entry_signal(self, ticker_config: Dict, option_type: str) -> Optional[Dict]:
         """
         Check if entry conditions are met for a ticker option
         
@@ -152,14 +152,14 @@ class TradingEngine:
         """
         try:
             # Get underlying price
-            underlying_price = self.client.get_underlying_price(ticker_config.symbol)
+            underlying_price = self.client.get_underlying_price(ticker_config['symbol'])
             if not underlying_price:
-                logger.warning(f"Could not get underlying price for {ticker_config.symbol}")
+                logger.warning(f"Could not get underlying price for {ticker_config['symbol']}")
                 return None
             
             # Find ATM option
             option = self.client.find_atm_option(
-                ticker_config.symbol,
+                ticker_config['symbol'],
                 option_type.lower(),
                 underlying_price,
                 DAYS_TO_EXPIRATION_MIN,
@@ -167,11 +167,12 @@ class TradingEngine:
             )
             
             if not option:
-                logger.warning(f"Could not find ATM option for {ticker_config.symbol} {option_type}")
+                logger.warning(f"Could not find ATM option for {ticker_config['symbol']} {option_type}")
                 return None
             
             # Get current option price
-            quote = self.client.get_option_quote(option['symbol'])
+            # get_option_quote accepts both OCC and streamer symbols
+            quote = self.client.get_option_quote(option['streamer_symbol'])
             if not quote or quote['mark'] <= 0:
                 logger.warning(f"Could not get quote for {option['symbol']}")
                 return None
@@ -179,57 +180,61 @@ class TradingEngine:
             current_price = quote['mark']
             
             # Get or set open price
+            # Ensure all numeric values are float to avoid Decimal issues
             open_price = self.get_or_set_open_price(
-                ticker_config.symbol,
+                ticker_config['symbol'],
                 option['symbol'],
                 option_type,
-                option['strike'],
+                float(option['strike']),
                 option['expiration'],
-                current_price,
-                underlying_price
+                float(current_price),
+                float(underlying_price)
             )
             
             if open_price <= 0:
                 return None
             
             # Calculate percentage change from open
+            # Convert to float to avoid Decimal arithmetic issues
+            current_price = float(current_price)
+            open_price = float(open_price)
             pct_change = ((current_price - open_price) / open_price) * 100
             
             # Check if threshold met (price must be ABOVE open + threshold)
-            threshold = ticker_config.threshold
+            threshold = ticker_config['threshold']
             
             logger.debug(
-                f"{ticker_config.symbol} {option_type} ${option['strike']}: "
+                f"{ticker_config['symbol']} {option_type} ${option['strike']}: "
                 f"Open=${open_price:.2f}, Current=${current_price:.2f}, "
                 f"Change={pct_change:.2f}%, Threshold={threshold:.2f}%"
             )
             
             if pct_change >= threshold:
                 logger.info(
-                    f"✓ ENTRY SIGNAL: {ticker_config.symbol} {option_type} ${option['strike']} - "
+                    f"[ENTRY SIGNAL] {ticker_config['symbol']} {option_type} ${option['strike']} - "
                     f"Open=${open_price:.2f}, Current=${current_price:.2f}, "
                     f"Change={pct_change:.2f}% (Threshold={threshold:.2f}%)"
                 )
                 
                 return {
-                    'ticker': ticker_config.symbol,
+                    'ticker': ticker_config['symbol'],
                     'option_symbol': option['symbol'],
                     'option_type': option_type,
-                    'strike': option['strike'],
+                    'strike': float(option['strike']),
                     'expiration': option['expiration'],
-                    'entry_price': current_price,
-                    'open_price': open_price,
-                    'pct_change': pct_change,
-                    'underlying_price': underlying_price
+                    'entry_price': float(current_price),
+                    'open_price': float(open_price),
+                    'pct_change': float(pct_change),
+                    'underlying_price': float(underlying_price)
                 }
             
             return None
             
         except Exception as e:
-            logger.error(f"Error checking entry signal for {ticker_config.symbol} {option_type}: {e}")
+            logger.error(f"Error checking entry signal for {ticker_config['symbol']} {option_type}: {e}")
             return None
     
-    def execute_trade(self, signal: Dict, ticker_config: Ticker) -> bool:
+    def execute_trade(self, signal: Dict, ticker_config: Dict) -> bool:
         """
         Execute a trade based on signal
         
@@ -259,14 +264,14 @@ class TradingEngine:
                 status='OPEN'
             ).count()
             
-            if open_positions >= ticker_config.max_positions:
-                logger.info(f"Max positions ({ticker_config.max_positions}) reached for {signal['ticker']}")
+            if open_positions >= ticker_config['max_positions']:
+                logger.info(f"Max positions ({ticker_config['max_positions']}) reached for {signal['ticker']}")
                 return False
             
             # Calculate quantity (number of contracts)
             # Each contract = 100 shares, cost = entry_price * 100
             cost_per_contract = signal['entry_price'] * 100
-            quantity = max(1, int(ticker_config.capital_per_trade / cost_per_contract))
+            quantity = max(1, int(ticker_config['capital_per_trade'] / cost_per_contract))
             
             # Place order via TastyTrade API
             order_id = self.client.place_order(
@@ -299,7 +304,7 @@ class TradingEngine:
             session.commit()
             
             logger.info(
-                f"✓ TRADE EXECUTED: {signal['ticker']} {signal['option_type']} "
+                f"[TRADE EXECUTED] {signal['ticker']} {signal['option_type']} "
                 f"${signal['strike']} @ ${signal['entry_price']:.2f} x{quantity} contracts "
                 f"(Order ID: {order_id})"
             )
@@ -313,17 +318,25 @@ class TradingEngine:
         finally:
             session.close()
     
-    def process_ticker(self, ticker_config: Ticker):
+    def process_ticker(self, ticker_symbol: str, ticker_threshold: float, ticker_max_positions: int, ticker_capital_per_trade: float):
         """
         Process a single ticker for trading signals
         
         Args:
-            ticker_config: Ticker configuration from database
+            ticker_symbol: Ticker symbol
+            ticker_threshold: Price threshold percentage
+            ticker_max_positions: Max positions allowed
+            ticker_capital_per_trade: Capital allocated per trade
         """
-        if not ticker_config.enabled:
-            return
-        
         try:
+            # Create a lightweight ticker config dict to avoid session issues
+            ticker_config = {
+                'symbol': ticker_symbol,
+                'threshold': ticker_threshold,
+                'max_positions': ticker_max_positions,
+                'capital_per_trade': ticker_capital_per_trade
+            }
+            
             # Check CALL option signal
             call_signal = self.check_entry_signal(ticker_config, 'CALL')
             if call_signal:
@@ -335,7 +348,7 @@ class TradingEngine:
                 self.execute_trade(put_signal, ticker_config)
                 
         except Exception as e:
-            logger.error(f"Error processing ticker {ticker_config.symbol}: {e}")
+            logger.error(f"Error processing ticker {ticker_symbol}: {e}")
     
     def update_positions(self):
         """Update open positions with current prices and P&L"""
@@ -404,10 +417,15 @@ class TradingEngine:
                 
                 logger.info(f"Processing {len(tickers)} enabled ticker(s)")
                 
-                # Process each ticker
+                # Process each ticker (extract values to avoid session issues)
                 for ticker in tickers:
                     logger.info(f"Checking {ticker.symbol} (threshold: {ticker.threshold}%)...")
-                    self.process_ticker(ticker)
+                    self.process_ticker(
+                        ticker.symbol,
+                        ticker.threshold,
+                        ticker.max_positions,
+                        ticker.capital_per_trade
+                    )
                 
                 # Update existing positions with current prices
                 self.update_positions()
