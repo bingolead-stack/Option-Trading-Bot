@@ -746,20 +746,6 @@ async def get_stats():
         session.close()
 
 
-# ==================== ERROR HANDLERS ====================
-
-@app.exception_handler(404)
-async def not_found_handler(request, exc):
-    """Handle 404 errors"""
-    return {"error": "Not found"}
-
-
-@app.exception_handler(500)
-async def internal_error_handler(request, exc):
-    """Handle 500 errors"""
-    return {"error": "Internal server error"}
-
-
 # For development
 if __name__ == '__main__':
     import uvicorn
