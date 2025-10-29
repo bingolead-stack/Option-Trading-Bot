@@ -25,7 +25,10 @@ DEFAULT_THRESHOLD = float(os.getenv('DEFAULT_THRESHOLD', 0.5))
 # Server Configuration
 PORT = int(os.getenv('PORT', 5000))
 DEBUG = os.getenv('DEBUG', 'true').lower() == 'true'
-CORS_ORIGINS = os.getenv('CORS_ORIGINS', 'http://localhost:3000').split(',')
+CORS_ORIGINS = os.getenv(
+    'CORS_ORIGINS', 
+    'http://localhost:3000,https://option-trading-bot.vercel.app,https://optionbotapi.duckdns.org'
+).split(',')
 
 # Database Configuration
 DATABASE_PATH = os.path.join(BASE_DIR, os.getenv('DATABASE_PATH', 'data/trading_bot.db'))
